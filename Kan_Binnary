@@ -1,0 +1,70 @@
+model = KAN(width=[12, 6, 3, 1, 1], grid=5, k=3, grid_eps=1.0, noise_scale_base=0.25)
+
+# Define optimizer
+#optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+optimizer = LBFGS(model.parameters(), lr=1, history_size=10, line_search_fn="strong_wolfe", tolerance_grad=1e-32, tolerance_change=1e-32, tolerance_ys=1e-32)
+
+# Define learning rate scheduler
+scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.8)
+
+
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+from sklearn.model_selection import KFold
+
+def percentual_ones(y):
+    # Calculate the percentage of elements equal to 1 in the tensor y
+    percentual = torch.mean((y == 1).float()) * 100
+    return percentual.item()  # Returns the value as a float
+
+def train(X, y, model, optimizer, scheduler, steps=50, log=1):
+    pbar = tqdm(range(steps), desc='Training Progress')
+
+    for epoch in pbar:
+        # Define the parameters
+        n_splits = 10
+        kf = KFold(n_splits=n_splits, shuffle=True)
+        
+        # Loop over cross-validation splits
+        for train_index, test_index in kf.split(X):
+            # Split the data into training and testing sets
+            X_train, X_test = X[train_index], X[test_index]
+            y_train, y_test = y[train_index], y[test_index]
+            
+            n1s = percentual_ones(y_train)
+            weights = torch.tensor([1/n1s], dtype=torch.float32)  # Calculate weights for BCELoss
+            # Define the loss function with the calculated weights
+            criterion = nn.BCELoss(weight=weights)
+            
+            def closure():
+                optimizer.zero_grad()
+                # Calculate the loss for the training data
+                pred_train = torch.sigmoid(model(X_train))
+                # pred_train = model(X_train)
+
+                # Reshape y_train to match the shape of pred_train
+                y_train_reshaped = y_train.view(-1, 1).double()  # Assuming binary classification
+                loss_train = criterion(pred_train, y_train_reshaped)
+                loss_train.backward()
+                return loss_train
+
+            # Update the grid every 5 iterations
+            if epoch % 5 == 0 and epoch < 50:
+                model.update_grid_from_samples(X_train)
+
+            # Optimization
+            loss_train = optimizer.step(closure)
+            scheduler.step()
+
+            # Calculate the loss for the testing data
+            with torch.no_grad():
+                pred_test = torch.sigmoid(model(X_test))
+                # pred_test = model(X_test)
+                # Reshape y_test to match the shape of pred_test
+                y_test_reshaped = y_test.view(-1, 1).double()  # Assuming binary classification
+                loss_test = criterion(pred_test, y_test_reshaped)
+
+            # Update the progress bar
+            if epoch % log == 0:
+                pbar.set_description(f"Epoch {epoch}, Loss Train: {loss_train.item():.4f}, Loss Test: {loss_test.item():.4f}")
